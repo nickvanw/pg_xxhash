@@ -1,0 +1,248 @@
+---
+name: Build and Release
+
+on:
+  release:
+    types: [created]
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build'
+        required: true
+        default: 'v0.1.0'
+
+jobs:
+  build:
+    name: Build for ${{ matrix.os }}-${{ matrix.arch }} PG${{ matrix.pg_version }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux AMD64 - Full PostgreSQL version support
+          - os: linux
+            arch: amd64
+            runner: ubuntu-latest
+            pg_version: "11"
+            pg_branch: "REL_11_STABLE"
+          - os: linux
+            arch: amd64
+            runner: ubuntu-latest
+            pg_version: "12"
+            pg_branch: "REL_12_STABLE"
+          - os: linux
+            arch: amd64
+            runner: ubuntu-latest
+            pg_version: "13"
+            pg_branch: "REL_13_STABLE"
+          - os: linux
+            arch: amd64
+            runner: ubuntu-latest
+            pg_version: "14"
+            pg_branch: "REL_14_STABLE"
+          - os: linux
+            arch: amd64
+            runner: ubuntu-latest
+            pg_version: "15"
+            pg_branch: "REL_15_STABLE"
+          - os: linux
+            arch: amd64
+            runner: ubuntu-latest
+            pg_version: "16"
+            pg_branch: "REL_16_STABLE"
+          # macOS AMD64 - Recent PostgreSQL versions
+          - os: macos
+            arch: amd64
+            runner: macos-latest
+            pg_version: "14"
+            pg_branch: "REL_14_STABLE"
+          - os: macos
+            arch: amd64
+            runner: macos-latest
+            pg_version: "15"
+            pg_branch: "REL_15_STABLE"
+          - os: macos
+            arch: amd64
+            runner: macos-latest
+            pg_version: "16"
+            pg_branch: "REL_16_STABLE"
+          # TODO: ARM64 support can be added later with GitHub's ARM64 runners
+          # or when cross-compilation setup becomes more reliable
+
+    steps:
+      - name: Checkout pg_xxhash
+        uses: actions/checkout@v4
+
+      - name: Setup Linux dependencies
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y build-essential bison flex zlib1g-dev libreadline-dev libxxhash-dev
+
+      - name: Setup macOS dependencies
+        if: matrix.os == 'macos'
+        run: |
+          brew install xxhash
+
+      - name: Checkout PostgreSQL
+        uses: actions/checkout@v4
+        with:
+          repository: postgres/postgres
+          ref: ${{ matrix.pg_branch }}
+          path: postgres
+          fetch-depth: 1
+
+      - name: Configure PostgreSQL (Linux)
+        if: matrix.os == 'linux'
+        run: |
+          cd postgres
+          ./configure --prefix=/tmp/pgsql --with-openssl --with-libxml --with-libxslt
+
+      - name: Configure PostgreSQL (macOS)
+        if: matrix.os == 'macos'
+        run: |
+          cd postgres
+          ./configure --prefix=/tmp/pgsql --with-openssl
+
+      - name: Build and install PostgreSQL
+        run: |
+          cd postgres
+          make -j$(nproc 2>/dev/null || sysctl -n hw.ncpu) install
+
+      - name: Build pg_xxhash (Linux)
+        if: matrix.os == 'linux'
+        run: |
+          make PG_CONFIG=/tmp/pgsql/bin/pg_config USE_PGXS=1 clean
+          make PG_CONFIG=/tmp/pgsql/bin/pg_config USE_PGXS=1 || true
+          # Ensure the shared library was built even if LLVM bytecode generation failed
+          test -f pg_xxhash.so
+
+      - name: Build pg_xxhash (macOS)
+        if: matrix.os == 'macos'
+        run: |
+          make PG_CONFIG=/tmp/pgsql/bin/pg_config USE_PGXS=1 clean
+          make PG_CONFIG=/tmp/pgsql/bin/pg_config USE_PGXS=1 || true
+          # Ensure the shared library was built even if LLVM bytecode generation failed
+          test -f pg_xxhash.so
+
+      - name: Package artifacts
+        run: |
+          mkdir -p artifacts/pg_xxhash-${{ matrix.os }}-${{ matrix.arch }}-pg${{ matrix.pg_version }}
+          
+          # Copy shared library
+          if [ "${{ matrix.os }}" = "macos" ]; then
+            cp pg_xxhash.so artifacts/pg_xxhash-${{ matrix.os }}-${{ matrix.arch }}-pg${{ matrix.pg_version }}/pg_xxhash.dylib
+          else
+            cp pg_xxhash.so artifacts/pg_xxhash-${{ matrix.os }}-${{ matrix.arch }}-pg${{ matrix.pg_version }}/
+          fi
+          
+          # Copy SQL files and control
+          cp pg_xxhash--0.1.sql artifacts/pg_xxhash-${{ matrix.os }}-${{ matrix.arch }}-pg${{ matrix.pg_version }}/
+          cp pg_xxhash.control artifacts/pg_xxhash-${{ matrix.os }}-${{ matrix.arch }}-pg${{ matrix.pg_version }}/
+          
+          # Create install script
+          cat > artifacts/pg_xxhash-${{ matrix.os }}-${{ matrix.arch }}-pg${{ matrix.pg_version }}/install.sh << 'EOF'
+          #!/bin/bash
+          set -e
+          
+          # Get PostgreSQL config
+          PG_CONFIG=${PG_CONFIG:-pg_config}
+          
+          if ! command -v $PG_CONFIG &> /dev/null; then
+              echo "pg_config not found. Please install PostgreSQL development packages or set PG_CONFIG environment variable."
+              exit 1
+          fi
+          
+          # Get PostgreSQL directories
+          LIBDIR=$($PG_CONFIG --pkglibdir)
+          SHAREDIR=$($PG_CONFIG --sharedir)
+          EXTDIR="$SHAREDIR/extension"
+          
+          echo "Installing pg_xxhash extension..."
+          echo "Library directory: $LIBDIR"
+          echo "Extension directory: $EXTDIR"
+          
+          # Install library
+          if [ -f "pg_xxhash.so" ]; then
+              sudo cp pg_xxhash.so "$LIBDIR/"
+          elif [ -f "pg_xxhash.dylib" ]; then
+              sudo cp pg_xxhash.dylib "$LIBDIR/pg_xxhash.so"
+          else
+              echo "Error: pg_xxhash library not found"
+              exit 1
+          fi
+          
+          # Install SQL and control files
+          sudo cp pg_xxhash.control "$EXTDIR/"
+          sudo cp pg_xxhash--0.1.sql "$EXTDIR/"
+          
+          echo "Installation complete!"
+          echo "You can now create the extension in PostgreSQL with: CREATE EXTENSION pg_xxhash;"
+          EOF
+          
+          chmod +x artifacts/pg_xxhash-${{ matrix.os }}-${{ matrix.arch }}-pg${{ matrix.pg_version }}/install.sh
+          
+          # Create README
+          cat > artifacts/pg_xxhash-${{ matrix.os }}-${{ matrix.arch }}-pg${{ matrix.pg_version }}/README.md << 'EOF'
+          # pg_xxhash Extension
+          
+          This package contains the pg_xxhash PostgreSQL extension for ${{ matrix.os }}-${{ matrix.arch }} PostgreSQL ${{ matrix.pg_version }}.
+          
+          ## Installation
+          
+          Run the install script as root or with sudo:
+          ```bash
+          ./install.sh
+          ```
+          
+          Or manually copy the files:
+          - Copy the shared library to your PostgreSQL lib directory
+          - Copy the .control and .sql files to your PostgreSQL extension directory
+          
+          ## Usage
+          
+          After installation, create the extension in your PostgreSQL database:
+          ```sql
+          CREATE EXTENSION pg_xxhash;
+          SELECT pg_xxhash64('hello world');
+          ```
+          
+          For more information, see: https://github.com/nickvanw/pg_xxhash
+          EOF
+
+      - name: Create tarball
+        run: |
+          cd artifacts
+          tar -czf pg_xxhash-${{ matrix.os }}-${{ matrix.arch }}-pg${{ matrix.pg_version }}.tar.gz pg_xxhash-${{ matrix.os }}-${{ matrix.arch }}-pg${{ matrix.pg_version }}/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg_xxhash-${{ matrix.os }}-${{ matrix.arch }}-pg${{ matrix.pg_version }}
+          path: artifacts/pg_xxhash-${{ matrix.os }}-${{ matrix.arch }}-pg${{ matrix.pg_version }}.tar.gz
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/')
+    
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Display structure
+        run: ls -la artifacts/
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v1
+        with:
+          files: artifacts/*/pg_xxhash-*.tar.gz
+          tag_name: ${{ github.event.release.tag_name || github.ref_name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

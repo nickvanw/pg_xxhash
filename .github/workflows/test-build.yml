@@ -1,0 +1,123 @@
+---
+name: Test Release Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_mode:
+        description: 'Test mode'
+        required: false
+        default: 'true'
+
+jobs:
+  test-build:
+    name: Test Build for ${{ matrix.os }}-${{ matrix.arch }} PG${{ matrix.pg_version }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Test with just a few combinations first
+          - os: linux
+            arch: amd64
+            runner: ubuntu-latest
+            pg_version: "16"
+            pg_branch: "REL_16_STABLE"
+          - os: macos
+            arch: amd64
+            runner: macos-latest
+            pg_version: "16"
+            pg_branch: "REL_16_STABLE"
+
+    steps:
+      - name: Checkout pg_xxhash
+        uses: actions/checkout@v4
+
+      - name: Setup Linux dependencies
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y build-essential bison flex zlib1g-dev libreadline-dev libxxhash-dev
+
+      - name: Setup macOS dependencies
+        if: matrix.os == 'macos'
+        run: |
+          brew install xxhash
+
+      - name: Checkout PostgreSQL
+        uses: actions/checkout@v4
+        with:
+          repository: postgres/postgres
+          ref: ${{ matrix.pg_branch }}
+          path: postgres
+          fetch-depth: 1
+
+      - name: Configure PostgreSQL (Linux)
+        if: matrix.os == 'linux'
+        run: |
+          cd postgres
+          ./configure --prefix=/tmp/pgsql --with-openssl --with-libxml --with-libxslt
+
+      - name: Configure PostgreSQL (macOS)
+        if: matrix.os == 'macos'
+        run: |
+          cd postgres
+          ./configure --prefix=/tmp/pgsql --with-openssl
+
+      - name: Build and install PostgreSQL
+        run: |
+          cd postgres
+          make -j$(nproc 2>/dev/null || sysctl -n hw.ncpu) install
+
+      - name: Build pg_xxhash
+        run: |
+          make PG_CONFIG=/tmp/pgsql/bin/pg_config USE_PGXS=1 clean
+          make PG_CONFIG=/tmp/pgsql/bin/pg_config USE_PGXS=1 || true
+          # Ensure the shared library was built even if LLVM bytecode generation failed
+          test -f pg_xxhash.so
+
+      - name: Test installation
+        run: |
+          # Create a minimal test
+          /tmp/pgsql/bin/initdb -D /tmp/testdb -A trust
+          /tmp/pgsql/bin/pg_ctl -D /tmp/testdb -l /tmp/testdb/pg.log start
+          sleep 2
+          
+          # Install the extension
+          make PG_CONFIG=/tmp/pgsql/bin/pg_config USE_PGXS=1 install
+          
+          # Test basic functionality
+          /tmp/pgsql/bin/psql -d postgres -c "CREATE EXTENSION pg_xxhash;"
+          /tmp/pgsql/bin/psql -d postgres -c "SELECT pg_xxhash64('test');"
+          
+          # Stop the server
+          /tmp/pgsql/bin/pg_ctl -D /tmp/testdb stop
+
+      - name: Package artifacts
+        run: |
+          mkdir -p artifacts/pg_xxhash-${{ matrix.os }}-${{ matrix.arch }}-pg${{ matrix.pg_version }}
+          
+          # Copy shared library
+          if [ "${{ matrix.os }}" = "macos" ]; then
+            cp pg_xxhash.so artifacts/pg_xxhash-${{ matrix.os }}-${{ matrix.arch }}-pg${{ matrix.pg_version }}/pg_xxhash.dylib
+          else
+            cp pg_xxhash.so artifacts/pg_xxhash-${{ matrix.os }}-${{ matrix.arch }}-pg${{ matrix.pg_version }}/
+          fi
+          
+          # Copy SQL files and control
+          cp pg_xxhash--0.1.sql artifacts/pg_xxhash-${{ matrix.os }}-${{ matrix.arch }}-pg${{ matrix.pg_version }}/
+          cp pg_xxhash.control artifacts/pg_xxhash-${{ matrix.os }}-${{ matrix.arch }}-pg${{ matrix.pg_version }}/
+          
+          # Create simple README
+          echo "pg_xxhash extension for ${{ matrix.os }}-${{ matrix.arch }} PostgreSQL ${{ matrix.pg_version }}" > artifacts/pg_xxhash-${{ matrix.os }}-${{ matrix.arch }}-pg${{ matrix.pg_version }}/README.txt
+
+      - name: Create tarball
+        run: |
+          cd artifacts
+          tar -czf pg_xxhash-${{ matrix.os }}-${{ matrix.arch }}-pg${{ matrix.pg_version }}.tar.gz pg_xxhash-${{ matrix.os }}-${{ matrix.arch }}-pg${{ matrix.pg_version }}/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg_xxhash-${{ matrix.os }}-${{ matrix.arch }}-pg${{ matrix.pg_version }}
+          path: artifacts/pg_xxhash-${{ matrix.os }}-${{ matrix.arch }}-pg${{ matrix.pg_version }}.tar.gz

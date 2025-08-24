@@ -1,0 +1,104 @@
+---
+name: Build ARM64 (Future)
+
+# This workflow is for future ARM64 support
+# Currently disabled until GitHub provides ARM64 runners or 
+# we have a reliable cross-compilation setup
+
+on:
+  workflow_dispatch:
+    inputs:
+      enable_arm64:
+        description: 'Enable ARM64 build (experimental)'
+        required: false
+        default: 'false'
+
+jobs:
+  build-arm64:
+    name: Build ARM64 (Experimental)
+    runs-on: ubuntu-latest
+    if: github.event.inputs.enable_arm64 == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        pg_version: ["15", "16"]
+        pg_branch: ["REL_15_STABLE", "REL_16_STABLE"]
+
+    steps:
+      - name: Checkout pg_xxhash
+        uses: actions/checkout@v4
+
+      - name: Setup cross-compilation environment
+        run: |
+          # Enable multiarch
+          sudo dpkg --add-architecture arm64
+          sudo apt-get update -y
+          
+          # Install cross-compilation tools
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          
+          # Install ARM64 libraries
+          sudo apt-get install -y \
+            libxxhash-dev:arm64 \
+            zlib1g-dev:arm64 \
+            libreadline-dev:arm64 \
+            libssl-dev:arm64
+
+      - name: Checkout PostgreSQL
+        uses: actions/checkout@v4
+        with:
+          repository: postgres/postgres
+          ref: ${{ matrix.pg_branch }}
+          path: postgres
+          fetch-depth: 1
+
+      - name: Configure PostgreSQL for ARM64
+        run: |
+          cd postgres
+          ./configure --prefix=/tmp/pgsql \
+            --host=aarch64-linux-gnu \
+            CC=aarch64-linux-gnu-gcc \
+            CPPFLAGS="-I/usr/include/aarch64-linux-gnu" \
+            LDFLAGS="-L/usr/lib/aarch64-linux-gnu" \
+            PKG_CONFIG_PATH="/usr/lib/aarch64-linux-gnu/pkgconfig"
+
+      - name: Build PostgreSQL
+        run: |
+          cd postgres
+          make -j$(nproc) install
+
+      - name: Cross-compile pg_xxhash
+        run: |
+          # Manual cross-compilation since PGXS cross-compilation is complex
+          export CC=aarch64-linux-gnu-gcc
+          export PKG_CONFIG_PATH="/usr/lib/aarch64-linux-gnu/pkgconfig"
+          
+          # Get PostgreSQL include directories
+          PG_INCLUDEDIR=$(/tmp/pgsql/bin/pg_config --includedir-server)
+          
+          # Compile object file
+          $CC -fPIC -I"$PG_INCLUDEDIR" -I/usr/include/aarch64-linux-gnu \
+            -c pg_xxhash.c -o pg_xxhash.o
+          
+          # Link shared library
+          $CC -shared -o pg_xxhash.so pg_xxhash.o \
+            -L/usr/lib/aarch64-linux-gnu -lxxhash
+          
+          # Verify the library is for ARM64
+          file pg_xxhash.so
+
+      - name: Package ARM64 artifacts
+        run: |
+          mkdir -p artifacts/pg_xxhash-linux-arm64-pg${{ matrix.pg_version }}
+          cp pg_xxhash.so artifacts/pg_xxhash-linux-arm64-pg${{ matrix.pg_version }}/
+          cp pg_xxhash--0.1.sql artifacts/pg_xxhash-linux-arm64-pg${{ matrix.pg_version }}/
+          cp pg_xxhash.control artifacts/pg_xxhash-linux-arm64-pg${{ matrix.pg_version }}/
+          
+          echo "pg_xxhash extension for Linux ARM64 PostgreSQL ${{ matrix.pg_version }}" > \
+            artifacts/pg_xxhash-linux-arm64-pg${{ matrix.pg_version }}/README.txt
+
+      - name: Upload ARM64 artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg_xxhash-linux-arm64-pg${{ matrix.pg_version }}
+          path: artifacts/pg_xxhash-linux-arm64-pg${{ matrix.pg_version }}/

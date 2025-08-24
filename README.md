@@ -24,6 +24,23 @@ $ USE_PGXS=1 make
 $ USE_PGXS=1 make install
 ```
 
+## Binary Releases
+
+Pre-compiled binaries are available for each release on the [releases page](https://github.com/nickvanw/pg_xxhash/releases). These binaries are automatically built for:
+
+- **Linux AMD64**: PostgreSQL 11, 12, 13, 14, 15, 16
+- **macOS AMD64**: PostgreSQL 14, 15, 16
+
+Each release package includes:
+- The compiled extension library
+- SQL installation files
+- Installation script for easy setup
+
+To use a binary release:
+1. Download the appropriate package for your platform and PostgreSQL version
+2. Extract the archive
+3. Run `./install.sh` or manually copy the files to your PostgreSQL directories
+
 ## Regression Tests
 
 ```sh
