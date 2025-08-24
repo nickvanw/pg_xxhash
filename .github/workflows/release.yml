@@ -22,7 +22,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux AMD64
+          # Linux AMD64 - Full PostgreSQL version support
           - os: linux
             arch: amd64
             runner: ubuntu-latest
@@ -53,23 +53,7 @@ jobs:
             runner: ubuntu-latest
             pg_version: "16"
             pg_branch: "REL_16_STABLE"
-          # Linux ARM64
-          - os: linux
-            arch: arm64
-            runner: ubuntu-latest
-            pg_version: "14"
-            pg_branch: "REL_14_STABLE"
-          - os: linux
-            arch: arm64
-            runner: ubuntu-latest
-            pg_version: "15"
-            pg_branch: "REL_15_STABLE"
-          - os: linux
-            arch: arm64
-            runner: ubuntu-latest
-            pg_version: "16"
-            pg_branch: "REL_16_STABLE"
-          # macOS
+          # macOS AMD64 - Recent PostgreSQL versions
           - os: macos
             arch: amd64
             runner: macos-latest
@@ -85,6 +69,8 @@ jobs:
             runner: macos-latest
             pg_version: "16"
             pg_branch: "REL_16_STABLE"
+          # TODO: ARM64 support can be added later with GitHub's ARM64 runners
+          # or when cross-compilation setup becomes more reliable
 
     steps:
       - name: Checkout pg_xxhash
@@ -94,20 +80,7 @@ jobs:
         if: matrix.os == 'linux'
         run: |
           sudo apt-get update -y
-          
-          # For ARM64 cross-compilation, enable multiarch first
-          if [ "${{ matrix.arch }}" = "arm64" ]; then
-            sudo dpkg --add-architecture arm64
-            sudo apt-get update -y
-          fi
-          
           sudo apt-get install -y build-essential bison flex zlib1g-dev libreadline-dev libxxhash-dev
-          
-          # Install ARM64 cross-compilation tools and libraries
-          if [ "${{ matrix.arch }}" = "arm64" ]; then
-            sudo apt-get install -y gcc-aarch64-linux-gnu
-            sudo apt-get install -y libxxhash-dev:arm64 zlib1g-dev:arm64 libreadline-dev:arm64
-          fi
 
       - name: Setup macOS dependencies
         if: matrix.os == 'macos'
@@ -122,21 +95,11 @@ jobs:
           path: postgres
           fetch-depth: 1
 
-      - name: Configure PostgreSQL (Linux AMD64)
-        if: matrix.os == 'linux' && matrix.arch == 'amd64'
+      - name: Configure PostgreSQL (Linux)
+        if: matrix.os == 'linux'
         run: |
           cd postgres
           ./configure --prefix=/tmp/pgsql --with-openssl --with-libxml --with-libxslt
-
-      - name: Configure PostgreSQL (Linux ARM64)
-        if: matrix.os == 'linux' && matrix.arch == 'arm64'
-        run: |
-          cd postgres
-          ./configure --prefix=/tmp/pgsql --host=aarch64-linux-gnu \
-            CC=aarch64-linux-gnu-gcc \
-            CPPFLAGS="-I/usr/include/aarch64-linux-gnu" \
-            LDFLAGS="-L/usr/lib/aarch64-linux-gnu" \
-            --with-openssl --with-libxml --with-libxslt
 
       - name: Configure PostgreSQL (macOS)
         if: matrix.os == 'macos'
@@ -147,24 +110,12 @@ jobs:
       - name: Build and install PostgreSQL
         run: |
           cd postgres
-          make -j$(nproc) install
+          make -j$(nproc 2>/dev/null || sysctl -n hw.ncpu) install
 
-      - name: Build pg_xxhash (Linux AMD64)
-        if: matrix.os == 'linux' && matrix.arch == 'amd64'
+      - name: Build pg_xxhash (Linux)
+        if: matrix.os == 'linux'
         run: |
           make PG_CONFIG=/tmp/pgsql/bin/pg_config USE_PGXS=1 clean
-          make PG_CONFIG=/tmp/pgsql/bin/pg_config USE_PGXS=1 || true
-          # Ensure the shared library was built even if LLVM bytecode generation failed
-          test -f pg_xxhash.so
-
-      - name: Build pg_xxhash (Linux ARM64)
-        if: matrix.os == 'linux' && matrix.arch == 'arm64'
-        run: |
-          make PG_CONFIG=/tmp/pgsql/bin/pg_config USE_PGXS=1 clean
-          # Set up cross-compilation environment
-          export CC=aarch64-linux-gnu-gcc
-          export PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
-          export PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
           make PG_CONFIG=/tmp/pgsql/bin/pg_config USE_PGXS=1 || true
           # Ensure the shared library was built even if LLVM bytecode generation failed
           test -f pg_xxhash.so
